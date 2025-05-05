@@ -120,6 +120,11 @@ class TelegramBotHandler {
           await this.settingsController.showSettingsMenu(chatId, userId);
           break;
         case 'set_buy_amount':
+        case 'change_currency':
+        case 'currency_SOL':
+        case 'currency_USDT':
+        case 'set_amount_SOL':
+        case 'set_amount_USDT':
           await this.settingsController.handleCallback(query);
           break;
         default:

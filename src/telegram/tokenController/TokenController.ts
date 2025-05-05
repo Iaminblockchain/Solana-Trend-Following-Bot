@@ -9,6 +9,8 @@ import { Connection, PublicKey } from '@solana/web3.js';
 import { SOLANA_CONNECTION } from '../../utils';
 import { getWalletByChatId } from '../../models/Wallet';
 import { getAllTokensWithBalance } from '../../utils/token';
+import { Settings } from '../../models/Settings';
+import { USDT_MINT } from '../../utils/constants';
 
 export class TokenController {
   private bot: TelegramBot;
@@ -63,18 +65,61 @@ export class TokenController {
             `• EMA (9): ${indicators.ema1.toFixed(10)}\n` +
             `• EMA (20): ${indicators.ema2.toFixed(10)}\n` +
             `• RSI: ${indicators.rsi.toFixed(2)}\n\n` +
-            `💡 Analysis:\n` +
-            `• Short-term (9) vs Long-term (20) moving averages show the current trend\n` +
-            `• RSI indicates if the token is overbought (>70) or oversold (<30)\n\n` +
+            // `💡 Analysis:\n` +
+            // `• Short-term (9) vs Long-term (20) moving averages show the current trend\n` +
+            // `• RSI indicates if the token is overbought (>70) or oversold (<30)\n\n` +
             `Updated: ${newStatus.updatedAt.toLocaleString()}`;
 
           // Get all subscribers for this token
           const subscriptions = await TokenSubscription.find({ tokenMint: mintAddress });
           for (const subscription of subscriptions) {
             try {
+              // Send alert message
               await this.bot.sendMessage(subscription.userId, message);
+
+              // Handle auto-buy/sell if enabled
+              if (subscription.autoBuy) {
+                const settings = await Settings.findOne({ userId: subscription.userId });
+                const currency = settings?.currency || 'SOL';
+                const buyAmount = currency === 'SOL' ? settings?.solBuyAmount || 0.1 : settings?.usdtBuyAmount || 1;
+
+                if (newStatus.trend === 'Bullish') {
+                  // Auto-buy on bullish signal
+                  await this.bot.sendMessage(subscription.userId, `🔄 Executing auto-buy for ${token.name}...`);
+                  const result = await this.tokenTransaction.buyToken(
+                    subscription.userId, 
+                    mintAddress, 
+                    buyAmount,
+                    true,
+                    currency === 'USDT' ? USDT_MINT : undefined
+                  );
+                  if (result.confirmed) {
+                    await this.bot.sendMessage(subscription.userId, 
+                      `✅ Auto-buy executed successfully!\nTransaction: https://solscan.io/tx/${result.txSignature}`
+                    );
+                  } else {
+                    await this.bot.sendMessage(subscription.userId, '❌ Auto-buy failed');
+                  }
+                } else if (newStatus.trend === 'Bearish') {
+                  // Auto-sell on bearish signal
+                  await this.bot.sendMessage(subscription.userId, `🔄 Executing auto-sell for ${token.name}...`);
+                  const result = await this.tokenTransaction.sellToken(
+                    subscription.userId, 
+                    mintAddress,
+                    true,
+                    currency === 'USDT' ? USDT_MINT : undefined
+                  );
+                  if (result.confirmed) {
+                    await this.bot.sendMessage(subscription.userId, 
+                      `✅ Auto-sell executed successfully!\nTransaction: https://solscan.io/tx/${result.txSignature}`
+                    );
+                  } else {
+                    await this.bot.sendMessage(subscription.userId, '❌ Auto-sell failed');
+                  }
+                }
+              }
             } catch (error) {
-              console.error(`Error sending message to user ${subscription.userId}:`, error);
+              console.error(`Error processing subscription for user ${subscription.userId}:`, error);
             }
           }
         }
@@ -229,8 +274,11 @@ export class TokenController {
     try {
       if (data.startsWith('buy_')) {
         const mintAddress = data.replace('buy_', '');
+        // Get user's settings to determine currency
+        const settings = await Settings.findOne({ userId: chatId });
+        const currency = settings?.currency || 'SOL';
         this.userStates.set(chatId, { action: 'buy', tokenMint: mintAddress });
-        await this.bot.sendMessage(chatId, 'Please enter the amount of SOL to buy:');
+        await this.bot.sendMessage(chatId, `Please enter the amount of ${currency} to buy:`);
       } else if (data.startsWith('sell_')) {
         const mintAddress = data.replace('sell_', '');
         await this.handleSellToken(chatId, mintAddress);
@@ -328,22 +376,6 @@ export class TokenController {
     }
   }
 
-  private async handleSellToken(chatId: number, mintAddress: string) {
-    try {
-      await this.bot.sendMessage(chatId, 'Processing sell order...');
-      const result = await this.tokenTransaction.sellToken(chatId, mintAddress);
-      
-      if (result.confirmed) {
-        await this.bot.sendMessage(chatId, `✅ Successfully sold all tokens!\nTransaction: https://solscan.io/tx/${result.txSignature}`);
-      } else {
-        await this.bot.sendMessage(chatId, '❌ Failed to sell tokens');
-      }
-    } catch (error: any) {
-      console.error('Error selling token:', error);
-      await this.bot.sendMessage(chatId, `Error selling token: ${error?.message || 'Unknown error'}`);
-    }
-  }
-
   public async handleMessage(msg: TelegramBot.Message) {
     const chatId = msg.chat.id;
     const text = msg.text;
@@ -359,20 +391,120 @@ export class TokenController {
       }
 
       try {
+        // Get user's settings to determine currency
+        const settings = await Settings.findOne({ userId: chatId });
+        const currency = settings?.currency || 'SOL';
+
         await this.bot.sendMessage(chatId, 'Processing buy order...');
-        const result = await this.tokenTransaction.buyToken(chatId, userState.tokenMint, amount);
+        const result = await this.tokenTransaction.buyToken(
+          chatId, 
+          userState.tokenMint, 
+          amount,
+          true,
+          currency === 'USDT' ? USDT_MINT : undefined
+        );
         
         if (result.confirmed) {
           await this.bot.sendMessage(chatId, `✅ Successfully bought tokens!\nTransaction: https://solscan.io/tx/${result.txSignature}`);
         } else {
-          await this.bot.sendMessage(chatId, '❌ Failed to buy tokens');
+          const errorMessage = result.error || 'Unknown error occurred';
+          await this.bot.sendMessage(chatId, `❌ Transaction failed: ${errorMessage}`);
         }
       } catch (error: any) {
         console.error('Error buying token:', error);
-        await this.bot.sendMessage(chatId, `Error buying token: ${error?.message || 'Unknown error'}`);
+        const errorMessage = error?.message || 'Unknown error occurred';
+        await this.bot.sendMessage(chatId, `❌ Transaction failed: ${errorMessage}`);
       }
 
       this.userStates.delete(chatId);
+    }
+  }
+
+  private async handleSellToken(chatId: number, mintAddress: string) {
+    try {
+      await this.bot.sendMessage(chatId, 'Processing sell order...');
+      const result = await this.tokenTransaction.sellToken(chatId, mintAddress);
+      
+      if (result.confirmed) {
+        await this.bot.sendMessage(chatId, `✅ Successfully sold all tokens!\nTransaction: https://solscan.io/tx/${result.txSignature}`);
+      } else {
+        const errorMessage = result.error || 'Unknown error occurred';
+        await this.bot.sendMessage(chatId, `❌ Transaction failed: ${errorMessage}`);
+      }
+    } catch (error: any) {
+      console.error('Error selling token:', error);
+      const errorMessage = error?.message || 'Unknown error occurred';
+      await this.bot.sendMessage(chatId, `❌ Transaction failed: ${errorMessage}`);
+    }
+  }
+
+  private async handleSignal(tokenMint: string, signal: 'Bullish' | 'Bearish') {
+    try {
+      // Get token info first
+      const token = await Token.findOne({ mintAddress: tokenMint });
+      if (!token) return;
+
+      // Get all subscribers for this token
+      const subscribers = await TokenSubscription.find({ tokenMint });
+      
+      for (const subscriber of subscribers) {
+        // Send signal alert
+        await this.bot.sendMessage(
+          subscriber.userId,
+          `🚨 Signal Alert for ${token.ticker}!\n\nSignal: ${signal === 'Bullish' ? '🟢 Bullish' : '🔴 Bearish'}`
+        );
+
+        // Check if auto-buy is enabled
+        if (subscriber.autoBuy) {
+          try {
+            // Get user's settings
+            const settings = await Settings.findOne({ chatId: subscriber.userId });
+            const currency = settings?.currency || 'SOL';
+            const buyAmount = currency === 'SOL' ? settings?.solBuyAmount || 0.1 : settings?.usdtBuyAmount || 1;
+
+            if (signal === 'Bullish') {
+              // Execute buy order
+              const result = await this.tokenTransaction.buyToken(
+                subscriber.userId,
+                tokenMint,
+                buyAmount,
+                true,
+                currency === 'USDT' ? USDT_MINT : undefined
+              );
+
+              if (result.confirmed) {
+                await this.bot.sendMessage(
+                  subscriber.userId,
+                  `✅ Auto-buy executed successfully!\n\nAmount: ${buyAmount} ${currency}\nToken: ${token.ticker}\n\nView transaction: ${result.txLink}`
+                );
+              }
+            } else {
+              // Execute sell order
+              const result = await this.tokenTransaction.sellToken(
+                subscriber.userId,
+                tokenMint,
+                true,
+                currency === 'USDT' ? USDT_MINT : undefined
+              );
+
+              if (result.confirmed) {
+                await this.bot.sendMessage(
+                  subscriber.userId,
+                  `✅ Auto-sell executed successfully!\n\nToken: ${token.ticker}\n\nView transaction: ${result.txLink}`
+                );
+              }
+            }
+          } catch (error: any) {
+            console.error('Error executing auto-trade:', error);
+            await this.bot.sendMessage(
+              subscriber.userId,
+              `❌ Error executing auto-trade: ${error.message}`
+            );
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Error handling signal:', error);
     }
   }
 } 

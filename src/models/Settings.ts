@@ -6,10 +6,20 @@ const settingsSchema = new mongoose.Schema({
     required: true,
     unique: true
   },
-  buyAmount: {
+  solBuyAmount: {
     type: Number,
     required: true,
     default: 0.1
+  },
+  usdtBuyAmount: {
+    type: Number,
+    required: true,
+    default: 1
+  },
+  currency: {
+    type: String,
+    enum: ['SOL', 'USDT'],
+    default: 'SOL'
   },
   createdAt: {
     type: Date,
