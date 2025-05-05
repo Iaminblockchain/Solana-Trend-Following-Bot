@@ -137,29 +137,37 @@ export class TokenController {
   }
 
   private async sendTrendMessage(chatId: number, mintAddress: string) {
-    const status = await TokenStatus.findOne({ tokenMint: mintAddress });
-    const token = await Token.findOne({ mintAddress });
+    try {
+      const status = await TokenStatus.findOne({ tokenMint: mintAddress });
+      const token = await Token.findOne({ mintAddress });
 
-    if (!status || !token) return;
+      if (!status || !token) {
+        await this.bot.sendMessage(chatId, '❌ Unable to fetch trend data for this token.');
+        return;
+      }
 
-    // Get current indicators
-    const indicators = await calculateIndicators(mintAddress);
+      // Get current indicators
+      const indicators = await calculateIndicators(mintAddress);
 
-    const message = 
-      `📊 Current Trend for ${token.name} (${token.ticker}):\n\n` +
-      `Trend: ${status.trend}\n` +
-      `Last Updated: ${status.updatedAt.toLocaleString()}\n\n` +
-      `📈 Current Indicators:\n` +
-      `• SMA (9): ${indicators.sma1.toFixed(10)}\n` +
-      `• SMA (20): ${indicators.sma2.toFixed(10)}\n` +
-      `• EMA (9): ${indicators.ema1.toFixed(10)}\n` +
-      `• EMA (20): ${indicators.ema2.toFixed(10)}\n` +
-      `• RSI: ${indicators.rsi.toFixed(2)}\n\n` +
-      `💡 Analysis:\n` +
-      `• Short-term (9) vs Long-term (20) moving averages show the current trend\n` +
-      `• RSI indicates if the token is overbought (>70) or oversold (<30)`;
+      const message = 
+        `📊 Current Trend for ${token.name} (${token.ticker}):\n\n` +
+        `Trend: ${status.trend === 'Bullish' ? '🟢 Bullish' : '🔴 Bearish'}\n` +
+        `Last Updated: ${status.updatedAt.toLocaleString()}\n\n` +
+        `📈 Current Indicators:\n` +
+        `• SMA (9): ${indicators.sma1.toFixed(10)}\n` +
+        `• SMA (20): ${indicators.sma2.toFixed(10)}\n` +
+        `• EMA (9): ${indicators.ema1.toFixed(10)}\n` +
+        `• EMA (20): ${indicators.ema2.toFixed(10)}\n` +
+        `• RSI: ${indicators.rsi.toFixed(2)}\n\n` +
+        `💡 Analysis:\n` +
+        `• Short-term (9) vs Long-term (20) moving averages show the current trend\n` +
+        `• RSI indicates if the token is overbought (>70) or oversold (<30)`;
 
-    await this.bot.sendMessage(chatId, message);
+      await this.bot.sendMessage(chatId, message);
+    } catch (error) {
+      console.error('Error sending trend message:', error);
+      await this.bot.sendMessage(chatId, '❌ Error fetching trend data. Please try again.');
+    }
   }
 
   public async showTokens(chatId: number) {
@@ -254,6 +262,9 @@ export class TokenController {
           { text: '💰 Buy', callback_data: `buy_${mintAddress}` },
           { text: '💸 Sell', callback_data: `sell_${mintAddress}` }
         ],
+        [
+          { text: '📈 Current Trend', callback_data: `trend_${mintAddress}` }
+        ],
         [{ text: '🔙 Back to Tokens', callback_data: 'tokens' }]
       ];
 
@@ -282,6 +293,9 @@ export class TokenController {
       } else if (data.startsWith('sell_')) {
         const mintAddress = data.replace('sell_', '');
         await this.handleSellToken(chatId, mintAddress);
+      } else if (data.startsWith('trend_')) {
+        const mintAddress = data.replace('trend_', '');
+        await this.sendTrendMessage(chatId, mintAddress);
       } else if (data.startsWith('subscribe_')) {
         const mintAddress = data.replace('subscribe_', '');
         const success = await this.subscribeToToken(chatId, mintAddress);

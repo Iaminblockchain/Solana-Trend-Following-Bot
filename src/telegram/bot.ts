@@ -122,9 +122,7 @@ class TelegramBotHandler {
         case 'set_buy_amount':
         case 'change_currency':
         case 'currency_SOL':
-        case 'currency_USDT':
         case 'set_amount_SOL':
-        case 'set_amount_USDT':
           await this.settingsController.handleCallback(query);
           break;
         default:
