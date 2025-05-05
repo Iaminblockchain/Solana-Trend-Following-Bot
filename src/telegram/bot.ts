@@ -2,15 +2,21 @@ import TelegramBot from 'node-telegram-bot-api';
 import mongoose from 'mongoose';
 import { config } from '../config/config';
 import { TokenController } from './tokenController/TokenController';
+import { WalletController } from './walletController/WalletController';
 import { Whitelist } from '../models/Whitelist';
+import { SettingsController } from './settingsController/SettingsController';
 
 class TelegramBotHandler {
   private bot: TelegramBot;
   private tokenController: TokenController;
+  private walletController: WalletController;
+  private settingsController: SettingsController;
 
   constructor() {
     this.bot = new TelegramBot(config.telegramBotToken, { polling: true });
     this.tokenController = new TokenController(this.bot);
+    this.walletController = new WalletController(this.bot);
+    this.settingsController = new SettingsController(this.bot);
     this.connectToMongoDB();
     this.setupCommands();
     this.setupHandlers();
@@ -80,7 +86,9 @@ class TelegramBotHandler {
           reply_markup: {
             inline_keyboard: [
               [{ text: '📊 Tokens', callback_data: 'tokens' }],
-              [{ text: '📈 History', callback_data: 'history' }]
+              [{ text: '👛 Wallet', callback_data: 'wallet' }],
+              [{ text: '📈 History', callback_data: 'history' }],
+              [{ text: '⚙️ Settings', callback_data: 'settings' }]
             ]
           }
         }
@@ -90,11 +98,17 @@ class TelegramBotHandler {
     // Handle callback queries
     this.bot.on('callback_query', async (query) => {
       const chatId = query.message?.chat.id;
-      if (!chatId) return;
+      const userId = query.from?.id;
+      const data = query.data;
 
-      switch (query.data) {
+      if (!chatId || !userId || !data) return;
+
+      switch (data) {
         case 'tokens':
           await this.tokenController.showTokens(chatId);
+          break;
+        case 'wallet':
+          await this.walletController.showWalletMenu(chatId, userId);
           break;
         case 'history':
           await this.showHistory(chatId);
@@ -102,14 +116,28 @@ class TelegramBotHandler {
         case 'back':
           await this.showMainMenu(chatId);
           break;
+        case 'settings':
+          await this.settingsController.showSettingsMenu(chatId, userId);
+          break;
+        case 'set_buy_amount':
+          await this.settingsController.handleCallback(query);
+          break;
         default:
-          if (query.data?.startsWith('token_')) {
-            const mintAddress = query.data.replace('token_', '');
+          if (data?.startsWith('token_')) {
+            const mintAddress = data.replace('token_', '');
             await this.tokenController.showTokenDetails(chatId, mintAddress);
-          } else if (query.data?.startsWith('trend_') || 
-                    query.data?.startsWith('subscribe_') || 
-                    query.data?.startsWith('unsubscribe_')) {
+          } else if (data?.startsWith('trend_') || 
+                    data?.startsWith('subscribe_') || 
+                    data?.startsWith('unsubscribe_') ||
+                    data?.startsWith('enable_autobuy_') ||
+                    data?.startsWith('disable_autobuy_') ||
+                    data?.startsWith('buy_') ||
+                    data?.startsWith('sell_')) {
             await this.tokenController.handleCallback(query);
+          } else if (data?.startsWith('add_wallet') ||
+                    data?.startsWith('update_wallet') ||
+                    data?.startsWith('remove_wallet')) {
+            await this.walletController.handleCallback(query);
           }
       }
     });
@@ -125,7 +153,7 @@ class TelegramBotHandler {
       }
 
       if (!msg.text?.startsWith('/')) {
-        this.showMainMenu(chatId);
+        await this.tokenController.handleMessage(msg);
       }
     });
   }
@@ -133,12 +161,15 @@ class TelegramBotHandler {
   private async showMainMenu(chatId: number) {
     await this.bot.sendMessage(
       chatId,
-      'Select an option:',
+      'Welcome to the Trend Following Bot!\n\n' +
+      'Please select an option from the menu below to get started with your trading journey.',
       {
         reply_markup: {
           inline_keyboard: [
             [{ text: '📊 Tokens', callback_data: 'tokens' }],
-            [{ text: '📈 History', callback_data: 'history' }]
+            [{ text: '👛 Wallet', callback_data: 'wallet' }],
+            [{ text: '📈 History', callback_data: 'history' }],
+            [{ text: '⚙️ Settings', callback_data: 'settings' }]
           ]
         }
       }

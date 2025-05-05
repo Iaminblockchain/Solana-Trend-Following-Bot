@@ -9,6 +9,10 @@ const tokenSubscriptionSchema = new mongoose.Schema({
     type: String, 
     required: true 
   },
+  autoBuy: {
+    type: Boolean,
+    default: false
+  },
   createdAt: { 
     type: Date, 
     default: Date.now 

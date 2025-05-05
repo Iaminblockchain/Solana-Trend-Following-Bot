@@ -3,13 +3,23 @@ import { Token } from '../../models/Token';
 import { TokenStatus } from '../../models/TokenStatus';
 import { TokenSubscription } from '../../models/TokenSubscription';
 import { calculateIndicators } from './indicators';
+import { TokenTransaction } from './TokenTransaction';
+import { Connection, PublicKey } from '@solana/web3.js';
+// import { getWalletByChatId, getAllTokensWithBalance } from '../../utils/walletUtils';
+import { SOLANA_CONNECTION } from '../../utils';
+import { getWalletByChatId } from '../../models/Wallet';
+import { getAllTokensWithBalance } from '../../utils/token';
 
 export class TokenController {
   private bot: TelegramBot;
   private trackingIntervals: Map<string, NodeJS.Timeout> = new Map();
+  private tokenTransaction: TokenTransaction;
+  private userStates: Map<number, { action: string; tokenMint: string }>;
 
   constructor(bot: TelegramBot) {
     this.bot = bot;
+    this.tokenTransaction = new TokenTransaction(new Connection(process.env.SOLANA_RPC_ENDPOINT || ''));
+    this.userStates = new Map();
     this.startTrackingAllTokens();
   }
 
@@ -137,7 +147,12 @@ export class TokenController {
 
       await this.bot.sendMessage(
         chatId,
-        '📊 Available Tokens:\nSelect a token to view details:',
+        '📊 Available Tokens:\n\n' +
+        'Select a token to view its detailed information, including:\n' +
+        '• Current price and market data\n' +
+        '• Trading signals and trends\n' +
+        '• Subscription status for alerts\n' +
+        '• Historical performance',
         {
           reply_markup: {
             inline_keyboard: buttons
@@ -153,88 +168,112 @@ export class TokenController {
   public async showTokenDetails(chatId: number, mintAddress: string) {
     try {
       const token = await Token.findOne({ mintAddress });
-      const userId = chatId; // In Telegram, chatId is the same as userId for private chats
-      
       if (!token) {
-        await this.bot.sendMessage(chatId, 'Token not found.');
+        await this.bot.sendMessage(chatId, 'Token not found');
         return;
       }
 
-      // Check if user is subscribed
-      const subscription = await TokenSubscription.findOne({ userId, tokenMint: mintAddress });
-      const subscriptionButton = subscription 
-        ? [{ text: '🔕 Unsubscribe from Alerts', callback_data: `unsubscribe_${mintAddress}` }]
-        : [{ text: '🔔 Subscribe to Alerts', callback_data: `subscribe_${mintAddress}` }];
+      const subscription = await TokenSubscription.findOne({
+        userId: chatId,
+        tokenMint: mintAddress
+      });
 
-      const message = 
-        `🔍 Token Details:\n\n` +
+      // Get wallet and token balance
+      const wallet = await getWalletByChatId(chatId);
+      let balance = '0';
+      if (wallet) {
+        const tokens = await getAllTokensWithBalance(
+          SOLANA_CONNECTION,
+          new PublicKey(wallet.publicKey)
+        );
+        const tokenInfo = tokens.find((t: any) => t.address === mintAddress);
+        if (tokenInfo) {
+          balance = tokenInfo.balance.toFixed(tokenInfo.decimals);
+        }
+      }
+
+      const message = `Token Details:\n\n` +
         `Name: ${token.name}\n` +
         `Ticker: ${token.ticker}\n` +
-        `Mint Address: ${token.mintAddress}\n` +
-        `Created: ${token.createdAt.toLocaleDateString()}\n\n` +
-        `Alert Status: ${subscription ? '🔔 Subscribed' : '🔕 Not Subscribed'}`;
+        `Mint Address: ${mintAddress}\n` +
+        `Your Balance: ${balance} ${token.ticker}\n` +
+        `Subscription Status: ${subscription ? '✅ Subscribed' : '❌ Not Subscribed'}\n` +
+        `Auto-buy: ${subscription?.autoBuy ? '✅ Enabled' : '❌ Disabled'}`;
 
-      await this.bot.sendMessage(
-        chatId,
-        message,
-        {
-          reply_markup: {
-            inline_keyboard: [
-              [{ text: '📈 Current Trend', callback_data: `trend_${mintAddress}` }],
-              subscriptionButton,
-              [{ text: '🔙 Back to Tokens', callback_data: 'tokens' }],
-              [{ text: '🔙 Back to Main Menu', callback_data: 'back' }]
-            ]
-          }
-        }
-      );
+      const keyboard = [
+        [
+          { text: subscription ? '❌ Unsubscribe' : '✅ Subscribe', callback_data: subscription ? `unsubscribe_${mintAddress}` : `subscribe_${mintAddress}` },
+          { text: subscription?.autoBuy ? '❌ Disable Auto-buy' : '✅ Enable Auto-buy', callback_data: subscription?.autoBuy ? `disable_autobuy_${mintAddress}` : `enable_autobuy_${mintAddress}` }
+        ],
+        [
+          { text: '💰 Buy', callback_data: `buy_${mintAddress}` },
+          { text: '💸 Sell', callback_data: `sell_${mintAddress}` }
+        ],
+        [{ text: '🔙 Back to Tokens', callback_data: 'tokens' }]
+      ];
+
+      await this.bot.sendMessage(chatId, message, {
+        reply_markup: { inline_keyboard: keyboard }
+      });
     } catch (error) {
-      console.error('Error fetching token details:', error);
-      await this.bot.sendMessage(chatId, 'Error fetching token details. Please try again later.');
+      console.error('Error showing token details:', error);
+      await this.bot.sendMessage(chatId, 'Error showing token details');
     }
   }
 
-  public async handleCallback(callbackQuery: TelegramBot.CallbackQuery) {
-    const chatId = callbackQuery.message?.chat.id;
-    const userId = callbackQuery.from?.id;
-    if (!chatId || !userId) {
-      console.log('Missing chatId or userId:', { chatId, userId });
-      return;
-    }
+  public async handleCallback(query: TelegramBot.CallbackQuery) {
+    const chatId = query.message?.chat.id;
+    const data = query.data;
+    if (!chatId || !data) return;
 
-    const data = callbackQuery.data;
-    if (!data) {
-      console.log('No callback data received');
-      return;
-    }
-
-    console.log('Handling callback:', { data, userId, chatId });
-
-    if (data.startsWith('trend_')) {
-      const mintAddress = data.replace('trend_', '');
-      await this.sendTrendMessage(chatId, mintAddress);
-    } else if (data.startsWith('subscribe_')) {
-      const mintAddress = data.replace('subscribe_', '');
-      const success = await this.subscribeToToken(userId, mintAddress);
-      if (success) {
-        await this.bot.sendMessage(chatId, '✅ Successfully subscribed to token alerts!');
-        // Refresh token details to show updated subscription status
-        await this.showTokenDetails(chatId, mintAddress);
-      } else {
-        await this.bot.sendMessage(chatId, '❌ Failed to subscribe to token alerts. Please try again.');
+    try {
+      if (data.startsWith('buy_')) {
+        const mintAddress = data.replace('buy_', '');
+        this.userStates.set(chatId, { action: 'buy', tokenMint: mintAddress });
+        await this.bot.sendMessage(chatId, 'Please enter the amount of SOL to buy:');
+      } else if (data.startsWith('sell_')) {
+        const mintAddress = data.replace('sell_', '');
+        await this.handleSellToken(chatId, mintAddress);
+      } else if (data.startsWith('subscribe_')) {
+        const mintAddress = data.replace('subscribe_', '');
+        const success = await this.subscribeToToken(chatId, mintAddress);
+        if (success) {
+          await this.bot.sendMessage(chatId, '✅ Successfully subscribed to token alerts!');
+          await this.showTokenDetails(chatId, mintAddress);
+        } else {
+          await this.bot.sendMessage(chatId, '❌ Failed to subscribe. Please try again.');
+        }
+      } else if (data.startsWith('unsubscribe_')) {
+        const mintAddress = data.replace('unsubscribe_', '');
+        const success = await this.unsubscribeFromToken(chatId, mintAddress);
+        if (success) {
+          await this.bot.sendMessage(chatId, '✅ Successfully unsubscribed from token alerts!');
+          await this.showTokenDetails(chatId, mintAddress);
+        } else {
+          await this.bot.sendMessage(chatId, '❌ Failed to unsubscribe. Please try again.');
+        }
+      } else if (data.startsWith('enable_autobuy_')) {
+        const mintAddress = data.replace('enable_autobuy_', '');
+        const success = await this.toggleAutoBuy(chatId, mintAddress, true);
+        if (success) {
+          await this.bot.sendMessage(chatId, '✅ Auto-buy enabled for this token!');
+          await this.showTokenDetails(chatId, mintAddress);
+        } else {
+          await this.bot.sendMessage(chatId, '❌ Failed to enable auto-buy. Please try again.');
+        }
+      } else if (data.startsWith('disable_autobuy_')) {
+        const mintAddress = data.replace('disable_autobuy_', '');
+        const success = await this.toggleAutoBuy(chatId, mintAddress, false);
+        if (success) {
+          await this.bot.sendMessage(chatId, '✅ Auto-buy disabled for this token!');
+          await this.showTokenDetails(chatId, mintAddress);
+        } else {
+          await this.bot.sendMessage(chatId, '❌ Failed to disable auto-buy. Please try again.');
+        }
       }
-    } else if (data.startsWith('unsubscribe_')) {
-      const mintAddress = data.replace('unsubscribe_', '');
-      console.log('Unsubscribing from token:', { mintAddress, userId });
-      const success = await this.unsubscribeFromToken(userId, mintAddress);
-      console.log('Unsubscription result:', success);
-      if (success) {
-        await this.bot.sendMessage(chatId, '✅ Successfully unsubscribed from token alerts!');
-        // Refresh token details to show updated subscription status
-        await this.showTokenDetails(chatId, mintAddress);
-      } else {
-        await this.bot.sendMessage(chatId, '❌ Failed to unsubscribe from token alerts. Please try again.');
-      }
+    } catch (error) {
+      console.error('Error handling callback:', error);
+      await this.bot.sendMessage(chatId, 'Error processing your request');
     }
   }
 
@@ -243,7 +282,11 @@ export class TokenController {
       console.log('Creating subscription:', { userId, mintAddress });
       const result = await TokenSubscription.findOneAndUpdate(
         { userId, tokenMint: mintAddress },
-        { userId, tokenMint: mintAddress },
+        { 
+          userId, 
+          tokenMint: mintAddress,
+          autoBuy: false // Explicitly set autoBuy to false for new subscriptions
+        },
         { upsert: true, new: true }
       );
       console.log('Subscription created:', result);
@@ -261,6 +304,75 @@ export class TokenController {
     } catch (error) {
       console.error('Error unsubscribing from token:', error);
       return false;
+    }
+  }
+
+  private async toggleAutoBuy(userId: number, mintAddress: string, enable: boolean): Promise<boolean> {
+    try {
+      console.log('Toggling auto-buy:', { userId, mintAddress, enable });
+      const subscription = await TokenSubscription.findOne({ userId, tokenMint: mintAddress });
+      console.log('Found subscription:', subscription);
+      
+      if (!subscription) {
+        console.log('No subscription found');
+        return false;
+      }
+
+      subscription.autoBuy = enable;
+      await subscription.save();
+      console.log('Updated subscription:', subscription);
+      return true;
+    } catch (error) {
+      console.error('Error toggling auto-buy:', error);
+      return false;
+    }
+  }
+
+  private async handleSellToken(chatId: number, mintAddress: string) {
+    try {
+      await this.bot.sendMessage(chatId, 'Processing sell order...');
+      const result = await this.tokenTransaction.sellToken(chatId, mintAddress);
+      
+      if (result.confirmed) {
+        await this.bot.sendMessage(chatId, `✅ Successfully sold all tokens!\nTransaction: https://solscan.io/tx/${result.txSignature}`);
+      } else {
+        await this.bot.sendMessage(chatId, '❌ Failed to sell tokens');
+      }
+    } catch (error: any) {
+      console.error('Error selling token:', error);
+      await this.bot.sendMessage(chatId, `Error selling token: ${error?.message || 'Unknown error'}`);
+    }
+  }
+
+  public async handleMessage(msg: TelegramBot.Message) {
+    const chatId = msg.chat.id;
+    const text = msg.text;
+
+    if (!text) return;
+
+    const userState = this.userStates.get(chatId);
+    if (userState?.action === 'buy') {
+      const amount = parseFloat(text);
+      if (isNaN(amount) || amount <= 0) {
+        await this.bot.sendMessage(chatId, 'Please enter a valid amount greater than 0');
+        return;
+      }
+
+      try {
+        await this.bot.sendMessage(chatId, 'Processing buy order...');
+        const result = await this.tokenTransaction.buyToken(chatId, userState.tokenMint, amount);
+        
+        if (result.confirmed) {
+          await this.bot.sendMessage(chatId, `✅ Successfully bought tokens!\nTransaction: https://solscan.io/tx/${result.txSignature}`);
+        } else {
+          await this.bot.sendMessage(chatId, '❌ Failed to buy tokens');
+        }
+      } catch (error: any) {
+        console.error('Error buying token:', error);
+        await this.bot.sendMessage(chatId, `Error buying token: ${error?.message || 'Unknown error'}`);
+      }
+
+      this.userStates.delete(chatId);
     }
   }
 } 
